@@ -1,0 +1,132 @@
+name: 'Build and Push Docker Image'
+description: 'Builds and pushes a Docker image to Amazon ECR (arm64 only)'
+
+inputs:
+  service-name:
+    description: 'Name of the service'
+    required: true
+  docker-context:
+    description: 'Docker build context'
+    required: false
+    default: ''
+  dockerfile:
+    description: 'Dockerfile path'
+    required: false
+    default: ''
+  target:
+    description: 'Optional Docker build target'
+    required: false
+    default: ''
+  repository:
+    description: 'ECR repository name'
+    required: false
+    default: ''
+  aws-role-arn:
+    description: 'AWS IAM role ARN for authentication'
+    required: true
+  aws-region:
+    description: 'AWS region'
+    required: true
+  push-image:
+    description: 'Whether to push the image (true/false)'
+    required: true
+    default: 'true'
+  ref:
+    description: 'Git branch name for tagging'
+    required: false
+    default: 'unspecified'
+
+outputs:
+  image:
+    description: 'Full image URI with sha tag that was pushed'
+    value: ${{ steps.image-uri.outputs.value }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        role-session-name: GitHubActions-${{ github.run_id }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Prepare build parameters
+      id: params
+      shell: bash
+      env:
+        INPUT_CONTEXT: ${{ inputs.docker-context }}
+        INPUT_DOCKERFILE: ${{ inputs.dockerfile }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        SERVICE_NAME: ${{ inputs.service-name }}
+      run: |
+        if [[ -z "${INPUT_CONTEXT}" ]]; then
+          echo "context=./${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
+        else
+          echo "context=${INPUT_CONTEXT}" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [[ -z "${INPUT_DOCKERFILE}" ]]; then
+          echo "dockerfile=./${SERVICE_NAME}/Dockerfile" >> "$GITHUB_OUTPUT"
+        else
+          echo "dockerfile=${INPUT_DOCKERFILE}" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [[ -z "${INPUT_REPOSITORY}" ]]; then
+          echo "repository=alita-${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
+        else
+          echo "repository=${INPUT_REPOSITORY}" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "target=${INPUT_TARGET}" >> "$GITHUB_OUTPUT"
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.login-ecr.outputs.registry }}/${{ steps.params.outputs.repository }}
+        tags: |
+          type=ref,event=tag
+          type=ref,event=branch
+          type=sha,format=short
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+        flavor: |
+          latest=false
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ steps.params.outputs.context }}
+        file: ${{ steps.params.outputs.dockerfile }}
+        target: ${{ steps.params.outputs.target }}
+        platforms: linux/arm64
+        push: ${{ inputs.push-image }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ steps.params.outputs.repository }}:cache-${{ inputs.ref }}
+        cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ steps.params.outputs.repository }}:cache-${{ inputs.ref }},mode=max
+        provenance: false
+        sbom: false
+
+    - name: Output image info
+      id: image-uri
+      shell: bash
+      env:
+        IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+      run: |
+        echo "Built and pushed ${{ steps.params.outputs.repository }} image for linux/arm64:"
+        echo "Tags: ${IMAGE_TAGS}"
+        SHA_IMAGE=$(echo "${IMAGE_TAGS}" | grep ':sha-' | head -n1 | tr -d '[:space:]')
+        if [[ -z "${SHA_IMAGE}" ]]; then
+          echo "ERROR: Could not extract sha-tagged image from tags: ${IMAGE_TAGS}" >&2
+          exit 1
+        fi
+        echo "value=${SHA_IMAGE}" >> "$GITHUB_OUTPUT"

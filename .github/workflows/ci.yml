@@ -1,0 +1,119 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ dev ]
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      force_deploy: ${{ steps.force.outputs.force_deploy }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check for force deploy flag
+      id: force
+      if: github.event_name == 'push'
+      run: |
+        COMMIT_MSG="${{ github.event.head_commit.message }}"
+        if echo "$COMMIT_MSG" | grep -qF '\force'; then
+          echo "force_deploy=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "force_deploy=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Detect changed paths
+      uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          app:
+            - 'src/**'
+            - 'main.py'
+            - 'pyproject.toml'
+            - 'uv.lock'
+            - 'ci/**'
+            - '.github/**'
+
+  build:
+    needs: [changes]
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || (github.ref == 'refs/heads/dev' && (needs.changes.outputs.app == 'true' || needs.changes.outputs.force_deploy == 'true')))
+
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Sanitize branch name
+      id: ref
+      run: |
+        BRANCH_NAME="${{ github.ref_name }}"
+        SANITIZED=$(echo "$BRANCH_NAME" | sed 's/\//-/g')
+        echo "name=${SANITIZED}" >> "$GITHUB_OUTPUT"
+
+    - name: Build and push Docker image to ECR
+      id: build
+      uses: ./.github/actions/docker-build-action
+      with:
+        service-name: demand-analyzer
+        docker-context: .
+        dockerfile: ./ci/Dockerfile
+        repository: ${{ vars.ECR_REPOSITORY_NAME }}
+        aws-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+        push-image: ${{ github.event_name != 'pull_request' }}
+        ref: ${{ steps.ref.outputs.name }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        role-session-name: GitHubActions-deploy-${{ github.run_id }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Deploy to ECS
+      uses: ./.github/actions/ecs-deploy-action
+      with:
+        ecs_task_definition: ${{ vars.ECS_TASK_DEFINITION }}
+        ecr_image: ${{ needs.build.outputs.image }}
+        ecs_cluster_name: ${{ vars.ECS_CLUSTER_NAME }}
+        ecs_service_name: ${{ vars.ECS_SERVICE_NAME }}

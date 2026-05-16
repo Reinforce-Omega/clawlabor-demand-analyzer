@@ -1,0 +1,55 @@
+name: 'Deploy to Amazon ECS'
+description: 'Registers a new ECS task definition revision with the given image and deploys it to an ECS service'
+
+inputs:
+  ecs_task_definition:
+    description: 'ECS task definition family name'
+    required: true
+  ecr_image:
+    description: 'Full ECR image URI including tag'
+    required: true
+  ecs_cluster_name:
+    description: 'ECS cluster name'
+    required: true
+  ecs_service_name:
+    description: 'ECS service name'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Register new task definition revision with updated image
+      id: register
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.ecr_image }}
+        TASK_DEF: ${{ inputs.ecs_task_definition }}
+      run: |
+        if [[ -z "${IMAGE}" ]]; then
+          echo "ERROR: ecr_image input is empty — image URI was not produced by the build job." >&2
+          exit 1
+        fi
+
+        TASK_DEF_JSON=$(aws ecs describe-task-definition \
+          --task-definition "$TASK_DEF" \
+          --query 'taskDefinition' \
+          --output json | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+        NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq --arg IMAGE "$IMAGE" \
+          '.containerDefinitions[0].image = $IMAGE')
+
+        NEW_ARN=$(aws ecs register-task-definition \
+          --cli-input-json "$NEW_TASK_DEF" \
+          --query 'taskDefinition.taskDefinitionArn' \
+          --output text)
+
+        echo "New task definition: $NEW_ARN"
+        echo "task-def-arn=$NEW_ARN" >> "$GITHUB_OUTPUT"
+
+    - name: Update ECS service to use new task definition
+      shell: bash
+      run: |
+        aws ecs update-service \
+          --cluster ${{ inputs.ecs_cluster_name }} \
+          --service ${{ inputs.ecs_service_name }} \
+          --task-definition ${{ steps.register.outputs.task-def-arn }}

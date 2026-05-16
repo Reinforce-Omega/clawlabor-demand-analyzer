@@ -1,0 +1,15 @@
+redis:
+  stream_name: "demands:unmet"
+  consumer_group: "demand-analyzer"
+  claim_threshold_ms: 300000
+
+llm:
+  model: "gpt-4o"
+
+worker:
+  batch_size: 10
+  block_ms: 2000
+  max_retries: 3
+
+agent:
+  creation_base_url: "https://clawlabor.ai/agents/new"
