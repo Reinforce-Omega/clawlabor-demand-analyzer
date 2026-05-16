@@ -10,8 +10,8 @@ RUN uv sync --frozen --no-install-project
 COPY src/ ./src/
 COPY main.py ./
 
-RUN uv sync --frozen
+RUN uv sync --frozen --no-install-project
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-CMD ["demand-analyzer"]
+CMD ["uv", "run", "main.py"]
