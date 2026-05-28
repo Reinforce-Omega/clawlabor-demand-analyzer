@@ -54,7 +54,7 @@ class Worker:
         retry_count = self._retry_counts.get(event.message_id, 0)
 
         try:
-            analysis = await llm.analyze(event.description)
+            rewrite, analysis = await llm.analyze(event.description)
         except ValueError as exc:
             # Malformed LLM output is deterministic — dead-letter immediately.
             logger.error("LLM returned invalid output, dead-lettering", extra={**log_ctx, "error": str(exc)})
@@ -66,7 +66,7 @@ class Worker:
             return
 
         try:
-            await lark.send(event, analysis)
+            await lark.send(event, rewrite, analysis)
         except Exception as exc:
             logger.error("Lark delivery failed", extra={**log_ctx, "error": str(exc), "retry_count": retry_count})
             await self._maybe_dead_letter(consumer, event, exc)

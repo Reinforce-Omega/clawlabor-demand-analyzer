@@ -4,7 +4,7 @@ import logging
 import httpx
 
 from .config import Config
-from .models import DemandEvent, LLMAnalysis
+from .models import CATEGORY_LABELS, DemandEvent, DemandRewrite, LLMAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +21,18 @@ class LarkNotifier:
     # Public
     # ------------------------------------------------------------------
 
-    async def send(self, event: DemandEvent, analysis: LLMAnalysis) -> None:
+    async def send(
+        self,
+        event: DemandEvent,
+        rewrite: DemandRewrite,
+        analysis: LLMAnalysis,
+    ) -> None:
         """Send an interactive card via the configured Lark webhook URL.
 
         Raises on permanent failure so the caller can decide not to ACK the
         Redis message.
         """
-        card = self._build_card(event, analysis)
+        card = self._build_card(event, rewrite, analysis)
 
         for attempt in range(3):
             resp = await self._client.post(
@@ -60,8 +65,14 @@ class LarkNotifier:
     # Card builder
     # ------------------------------------------------------------------
 
-    def _build_card(self, event: DemandEvent, analysis: LLMAnalysis) -> dict:
+    def _build_card(
+        self,
+        event: DemandEvent,
+        rewrite: DemandRewrite,
+        analysis: LLMAnalysis,
+    ) -> dict:
         priority_pct = f"{analysis.priority_score:.0%}"
+        category_label = CATEGORY_LABELS.get(analysis.category, analysis.category)
         caps = "\n".join(f"• {c}" for c in analysis.required_capabilities) or "—"
 
         def _fmt_fields(fields: list) -> str:
@@ -71,8 +82,18 @@ class LarkNotifier:
                 lines.append(f"• **{f.name}** `{f.type}`{req}: {f.description}")
             return "\n".join(lines) or "—"
 
+        def _bullets(items: list[str]) -> str:
+            return "\n".join(f"• {x}" for x in items) or "—"
+
+        def _kv(d: dict[str, str]) -> str:
+            return "\n".join(f"• **{k}**: {v}" for k, v in d.items()) or "—"
+
         header_color = {"low": "green", "medium": "yellow", "high": "red"}.get(
             analysis.complexity, "blue"
+        )
+
+        category_hints_label = (
+            ", ".join(CATEGORY_LABELS.get(s, s) for s in rewrite.category_hints) or "—"
         )
 
         return {
@@ -80,11 +101,107 @@ class LarkNotifier:
             "header": {
                 "title": {
                     "tag": "plain_text",
-                    "content": f"[New Unmet Demand] {analysis.category} · priority {priority_pct}",
+                    "content": f"[New Unmet Demand] {category_label} · priority {priority_pct}",
                 },
                 "template": header_color,
             },
             "elements": [
+                # ─── Section 1: Original signal ───────────────────────────
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "**📥 Original Demand**",
+                    },
+                },
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            f"**Signal Type** `{event.signal_type}`\n"
+                            f"**Description**\n> {event.description}"
+                        ),
+                    },
+                },
+                {"tag": "hr"},
+                # ─── Section 2: Stage-1 rewrite ───────────────────────────
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": (
+                            "**🔄 Rewrite (Generic Task Shape)**\n"
+                            f"_source_language_: `{rewrite.source_language}` · "
+                            f"_confidence_: {rewrite.confidence:.2f}"
+                        ),
+                    },
+                },
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**Normalized Task**\n{rewrite.normalized_task}",
+                    },
+                },
+                {
+                    "tag": "div",
+                    "fields": [
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": f"**Category Hints**\n{category_hints_label}",
+                            },
+                        },
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": f"**Constraints**\n{_kv(rewrite.constraints)}",
+                            },
+                        },
+                    ],
+                },
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**Capability Terms**\n{_bullets(rewrite.capability_terms)}",
+                    },
+                },
+                {
+                    "tag": "div",
+                    "fields": [
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": (
+                                    f"**Input Artifacts**\n{_bullets(rewrite.input_artifacts)}"
+                                ),
+                            },
+                        },
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": (
+                                    f"**Output Artifacts**\n{_bullets(rewrite.output_artifacts)}"
+                                ),
+                            },
+                        },
+                    ],
+                },
+                {"tag": "hr"},
+                # ─── Section 3: Stage-2 proposal ──────────────────────────
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "**🎯 Proposed SKU**",
+                    },
+                },
                 {
                     "tag": "div",
                     "fields": [
